@@ -16,7 +16,8 @@
 
 (def reader-opts
   {:read-cond :allow
-   :features  #{:clj}
+   ;; under jolt, prefer :jolt branches the same way jolt's own loader does
+   :features  #?(:jolt #{:jolt :clj} :clj #{:clj})
    :eof       ::eof})
 
 (def dummy-resolver
@@ -30,10 +31,50 @@
     (resolveVar [_ sym]
       sym)))
 
+(def ^:dynamic *read-ns*
+  "Namespace bound as `*ns*` while reading forms. Jolt's reader ignores
+  `*reader-resolver*` and resolves `::alias/kw` through the aliases of `*ns*`,
+  so `with-read-ns` sets up a scratch namespace with the aliases a file uses."
+  nil)
+
+(def ^:private alias-ns-prefix
+  "clj-reload.alias.")
+
+(defn- scan-aliases
+  "Returns the set of alias symbols used as `::alias/name` in `content`. May
+  over-match inside strings and comments, which is harmless."
+  [^String content]
+  (into #{}
+    (map (comp symbol second))
+    (re-seq #"::([^\s/\[\]{}()\"';@^`~\\,:]+)/" content)))
+
+(defn call-with-read-ns
+  "Calls `(f)` with `*read-ns*` bound to a scratch namespace aliasing every
+  `::alias/` used in `content`, then removes the scratch namespaces."
+  [^String content f]
+  (let [read-ns (create-ns (gensym "clj-reload.read-ns-"))
+        targets (for [a (scan-aliases content)]
+                  (let [target (create-ns (symbol (str alias-ns-prefix a)))]
+                    (binding [*ns* read-ns]
+                      (alias a (ns-name target)))
+                    (ns-name target)))
+        targets (doall targets)]
+    (try
+      (binding [*read-ns* read-ns]
+        (f))
+      (finally
+        (remove-ns (ns-name read-ns))
+        (doseq [t targets]
+          (remove-ns t))))))
+
+(defmacro with-read-ns [content & body]
+  `(call-with-read-ns ~content (fn [] ~@body)))
+
 (defn read-form [reader]
   (binding [*read-eval*       false
             *suppress-read*   true
-            *reader-resolver* dummy-resolver]
+            *reader-resolver* dummy-resolver
+            *ns*              (or *read-ns* *ns*)]
     (read reader-opts reader)))
 
 (defn throwable? [o]
@@ -121,7 +162,14 @@
 (defn ns-load-file [content ns ^File file]
   (let [[_ ext] (re-matches #".*\.([^.]+)" (.getName file))
         path    (-> ns str (str/replace #"\-" "_") (str/replace #"\." "/") (str "." ext))]
-    (Compiler/load (StringReader. content) path (.getName file))))
+    #?(:jolt
+       ;; jolt has no Compiler/load; load-reader is the closest equivalent
+       (binding [*ns*          *ns*
+                 *file*        path
+                 *source-path* (.getName file)]
+         (load-reader (StringReader. content)))
+       :clj
+       (Compiler/load (StringReader. content) path (.getName file)))))
 
 (defn loader-classpath []
   (->> (clojure.lang.RT/baseLoader)

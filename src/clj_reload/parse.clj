@@ -69,9 +69,11 @@
 (defn read-file
   "Returns {<symbol> NS} or Exception"
   ([file]
-   (with-open [rdr (util/file-reader file)]
+   (let [content (slurp file)]
      (try
-       (read-file rdr file)
+       (util/with-read-ns content
+         (with-open [rdr (util/string-reader content)]
+           (read-file rdr file)))
        (catch Exception e
          (util/log "Failed to read" (.getPath ^File file) (.getMessage e))
          (ex-info (str "Failed to read " (.getPath ^File file)) {:file file} e)))))

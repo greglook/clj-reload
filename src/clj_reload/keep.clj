@@ -3,7 +3,7 @@
     [clj-reload.util :as util]
     [clojure.string :as str])
   (:import
-    [clojure.lang Var]
+    [clojure.lang LineNumberingPushbackReader Var]
     [java.io File]))
 
 (defn maybe-quote [form]
@@ -132,13 +132,35 @@
                  :when resolved]
     [sym resolved]))
 
-(defn patch-file [content patch-fn]
+(defn- line-offsets
+  "Returns a vector of the character offset at which each line of `content`
+  starts, indexed from zero."
+  [^String content]
+  (loop [i 0, acc (transient [0])]
+    (let [j (.indexOf content "\n" (int i))]
+      (if (neg? j)
+        (persistent! acc)
+        (recur (inc j) (conj! acc (inc j)))))))
+
+(defn- reader-offset
+  "Character offset of `rdr` into the content it reads, computed from its
+  line/column position. Jolt's reader lacks `captureString`/`getString`."
+  ^long [offsets ^String content ^LineNumberingPushbackReader rdr]
+  (let [line (dec (.getLineNumber rdr))]
+    ;; at EOF jolt reports a phantom extra line, even without a trailing newline
+    (if (< line (count offsets))
+      (min (count content)
+           (+ (nth offsets line) (dec (.getColumnNumber rdr))))
+      (count content))))
+
+(defn- patch-file* [^String content patch-fn]
   (let [rdr     (util/string-reader content)
+        offsets (line-offsets content)
         patched (StringBuilder.)]
-    (loop []
-      (.captureString rdr)
+    (loop [start 0]
       (let [form (util/read-form rdr)
-            text (.getString rdr)]
+            end  (reader-offset offsets content rdr)
+            text (subs content start end)]
         (cond
           (= :clj-reload.util/eof form)
           (str patched)
@@ -158,15 +180,19 @@
                              (str/join (repeat (count (last lines)) \space))))]
               (do
                 (.append patched text'')
-                (recur)))
+                (recur end)))
             (do
               (.append patched text)
-              (recur)))
+              (recur end)))
           
           :else
           (do
             (.append patched text)
-            (recur)))))))
+            (recur end)))))))
+
+(defn patch-file [content patch-fn]
+  (util/with-read-ns content
+    (patch-file* content patch-fn)))
 
 (defn patch-fn [ns keeps]
   (fn [[tag sym]]

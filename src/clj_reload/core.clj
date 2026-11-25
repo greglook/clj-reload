@@ -291,7 +291,13 @@
     (if (empty? keeps)
       (util/ns-load-file (slurp file) ns file)
       (keep/ns-load-patched ns file keeps))
-    
+
+    ;; Clojure's `ns` macro registers the lib in *loaded-libs*, but jolt's
+    ;; doesn't, so do it here or the ns would be skipped on the next reload
+    (when (find-ns ns)
+      (dosync
+        (alter @#'clojure.core/*loaded-libs* conj ns)))
+
     (when-some [reload-hook (:reload-hook *config*)]
       (when-some [reload-fn (ns-resolve (find-ns ns) reload-hook)]
         (reload-fn)))
